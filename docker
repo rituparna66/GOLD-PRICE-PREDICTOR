@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────
+# Dockerfile — XAU/USD ML Signal API
+# ─────────────────────────────────────────────
+# Multi-stage build:
+#   Stage 1: install dependencies (cached layer)
+#   Stage 2: copy app code (fast rebuilds)
+#
+# IB Production: This image would be pushed to ECR/GCR
+# and deployed to EKS/GKE with resource limits set.
+
+# ── Stage 1: dependency builder ──────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# Install build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+
+# ── Stage 2: runtime image ───────────────────
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy application code
+COPY data/       ./data/
+COPY features/   ./features/
+COPY model/      ./model/
+COPY api/        ./api/
+COPY tests/      ./tests/
+
+# Create __init__.py files for package imports
+RUN touch data/__init__.py features/__init__.py \
+         model/__init__.py api/__init__.py tests/__init__.py
+
+# MLflow tracking directory
+RUN mkdir -p /app/mlruns /app/model/artifacts
+
+# Non-root user for security (IB security requirement)
+RUN adduser --disabled-password --gecos "" appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# Expose port
+EXPOSE 8000
+
+# Health check — used by K8s readiness probe
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+# Start API
+CMD ["uvicorn", "api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--log-level", "info"]
