@@ -1,0 +1,91 @@
+# docker-compose.yml
+# -------------------
+# Runs three services:
+#   1. api       — FastAPI prediction server (port 8000)
+#   2. mlflow    — Experiment tracking UI (port 5000)
+#   3. train     — One-shot training job (runs then exits)
+#
+# Usage:
+#   docker-compose up --build         # Start all services
+#   docker-compose up api mlflow      # Start only API + MLflow
+#   docker-compose run train          # Run training only
+
+version: "3.9"
+
+services:
+
+  # ── Training job ────────────────────────────
+  train:
+    build: .
+    command: python model/train.py
+    volumes:
+      - ./model/artifacts:/app/model/artifacts   # persist trained model
+      - mlflow_data:/app/mlruns                  # persist MLflow runs
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - PYTHONPATH=/app
+    depends_on:
+      - mlflow
+    profiles:
+      - training  # only runs with: docker-compose --profile training up
+
+  # ── API server ──────────────────────────────
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model/artifacts:/app/model/artifacts:ro  # read-only model mount
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - PYTHONPATH=/app
+      - LOG_LEVEL=info
+    depends_on:
+      - mlflow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── MLflow tracking server ──────────────────
+  mlflow:
+    image: python:3.11-slim
+    command: >
+      bash -c "pip install mlflow -q &&
+               mlflow server
+               --host 0.0.0.0
+               --port 5000
+               --backend-store-uri /mlruns
+               --default-artifact-root /mlruns"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlruns
+    restart: unless-stopped
+
+volumes:
+  mlflow_data:
+    driver: local
+
+# ─────────────────────────────────────────────
+# Quick reference:
+#
+# Train model:
+#   docker-compose --profile training up train
+#
+# Start API + MLflow:
+#   docker-compose up api mlflow
+#
+# View API docs:
+#   http://localhost:8000/docs
+#
+# View MLflow UI:
+#   http://localhost:5000
+#
+# Run tests:
+#   docker-compose run api pytest tests/ -v
+# ─────────────────────────────────────────────
